@@ -40,4 +40,6 @@ class HmDianPingApplicationTests {
 //        shopService.saveShopToCache(1L, RedisConstants.CACHE_SHOP_LOGICAL_TTL);
 //    }
 
+
+
 }
