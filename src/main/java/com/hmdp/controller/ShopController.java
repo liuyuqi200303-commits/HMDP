@@ -32,6 +32,18 @@ public class ShopController {
     @Resource
     public IShopTypeService shopTypeService;
 
+//    /**
+//     * 根据id查询商铺信息，并进行缓存 -- 测试逻辑过期
+//     * @param id
+//     * @return
+//     */
+//    @GetMapping("/save/{id}")
+//    public Result saveShop(@PathVariable("id") Long id) {
+//        // 传入 id，逻辑过期时间设为 10 秒
+//        shopService.saveShopToCache(id, 10L);
+//        return Result.ok();
+//    }
+
     /**
      * 根据id查询商铺信息
      * @param id 商铺id

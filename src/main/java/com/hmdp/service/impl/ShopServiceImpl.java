@@ -2,6 +2,7 @@ package com.hmdp.service.impl;
 
 import cn.hutool.core.lang.UUID;
 import cn.hutool.core.util.StrUtil;
+import cn.hutool.json.JSONObject;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
@@ -12,16 +13,16 @@ import com.hmdp.entity.Shop;
 import com.hmdp.entity.ShopType;
 import com.hmdp.mapper.ShopMapper;
 import com.hmdp.service.IShopService;
-import com.hmdp.utils.ILock;
-import com.hmdp.utils.RedisConstants;
-import com.hmdp.utils.SimpleRedisLock;
-import com.hmdp.utils.SystemConstants;
+import com.hmdp.utils.*;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 import static com.hmdp.utils.RedisConstants.CACHE_SHOP_KEY;
@@ -39,6 +40,11 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
 
     @Autowired
     private StringRedisTemplate stringRedisTemplate;
+
+    /**
+     * 缓存重建线程池---线程池，用于后台重建缓存
+     */
+    public static final ExecutorService CACHE_REBUILD_EXECUTOR = Executors.newFixedThreadPool(10);
 
     /**
      * 根据id查询商铺数据 -- 解决缓存击穿-爆款商品过期时间到了，或者redis重启了，上千请求同时查询mysql
@@ -104,7 +110,99 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         }
     }
 
-    //    /**
+    /**
+     * 根据类型查询商铺数据
+     * @param typeId
+     * @param current
+     * @return
+     */
+    @Override
+    public Result queryShopByType(Integer typeId, Integer current) {
+        // 1. 构建分页对象
+        Page<Shop> page = new Page<>(current, SystemConstants.DEFAULT_PAGE_SIZE);
+
+        // 2. 构建查询条件
+        LambdaQueryWrapper<Shop> queryWrapper = new LambdaQueryWrapper<>();
+        queryWrapper.eq(Shop::getTypeId, typeId);
+
+        // 3. 执行分页查询（用 this.page，而不是 this.lambdaQuery）
+        this.page(page, queryWrapper);
+
+        // 4. 返回分页后的数据
+        return Result.ok(page.getRecords());
+    }
+
+//    /**
+//     * 根据id查询商铺数据 -- 解决缓存击穿-爆款商品过期时间到了，或者redis重启了，上千请求同时查询mysql
+//     * @param id
+//     * @return
+//     */
+//    @Override
+//    public Result queryById(Long id) {
+//        String key = RedisConstants.CACHE_SHOP_KEY + id;
+//        // 1. 从 Redis 查数据
+//        String shopJson = stringRedisTemplate.opsForValue().get(key);
+//
+//        // 2. 如果连空数据都没有，说明这个店压根没做过逻辑过期预热，直接返回错误
+//        if (StrUtil.isBlank(shopJson)) {
+//            return Result.fail("店铺不存在！");
+//        }
+//
+//        // 3. 反序列化成 RedisData 对象
+//        RedisData redisData = JSONUtil.toBean(shopJson, RedisData.class);
+//        // 因为 JSON 反序列化时，data 默认是 JSONObject，需要二次转换
+//        Shop shop = JSONUtil.toBean((JSONObject) redisData.getData(), Shop.class);
+//        LocalDateTime expireTime = redisData.getExpireTime();
+//
+//        // 4. 判断是否逻辑过期
+//        if (expireTime.isAfter(LocalDateTime.now())) {
+//            // 未过期，直接返回数据
+//            return Result.ok(shop);
+//        }
+//
+//        // 5. 已过期，尝试获取互斥锁
+//        String lockKey = RedisConstants.LOCK_SHOP_KEY + id;
+//        ILock lock = new SimpleRedisLock(lockKey, stringRedisTemplate);
+//        boolean isLock = lock.tryLock(10);
+//
+//        if (isLock) {
+//            // 6. 获取锁成功，开启独立线程去重建缓存
+//            CACHE_REBUILD_EXECUTOR.submit(() -> {
+//                try {
+//                    // 模拟重建缓存的耗时（测试用）
+//                    // Thread.sleep(200);
+//                    this.saveShopToCache(id, 30L); // 30秒后逻辑过期
+//                } catch (Exception e) {
+//                    e.printStackTrace();
+//                } finally {
+//                    lock.unlock();
+//                }
+//            });
+//        }
+//
+//        // 7. 无论是否获取到锁，都把旧数据直接返回给用户（实现高可用）
+//        return Result.ok(shop);
+//    }
+//
+//    /**
+//     * 保存数据到 Redis（不设置物理 TTL）--- 用于逻辑过期解决缓存击穿
+//     * @param id
+//     * @param expireSeconds
+//     */
+//    public void saveShopToCache(Long id, Long expireSeconds) {
+//        Shop shop = this.getById(id);
+//        if (shop == null) {
+//            return;
+//        }
+//        RedisData redisData = new RedisData();
+//        redisData.setData(shop);
+//        // 设置逻辑过期时间：当前时间 + 30 秒
+//        redisData.setExpireTime(LocalDateTime.now().plusSeconds(expireSeconds));
+//        // 存入 Redis，注意：这里不要传 TimeUnit 参数，让它永不过期
+//        stringRedisTemplate.opsForValue().set(RedisConstants.CACHE_SHOP_KEY + id, JSONUtil.toJsonStr(redisData));
+//    }
+
+//          /**
 //     * 根据id查询商铺数据 -- 防止缓存穿透：有人恶意请求数据库里根本不存在的数据（比如 id = -1）。
 //     * 解决方法：即使数据库里没有，也往 Redis 里存一个空字符串（""），并设置一个较短的过期时间（比如 2 分钟）。这样下次再来查 -1，直接在 Redis 拿到空字符串就返回了，保护了数据库。
 //     * @param id
@@ -177,27 +275,5 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
 //        stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(shop));
 //        return Result.ok(shop);
 //    }
-
-    /**
-     * 根据类型查询商铺数据
-     * @param typeId
-     * @param current
-     * @return
-     */
-    @Override
-    public Result queryShopByType(Integer typeId, Integer current) {
-        // 1. 构建分页对象
-        Page<Shop> page = new Page<>(current, SystemConstants.DEFAULT_PAGE_SIZE);
-
-        // 2. 构建查询条件
-        LambdaQueryWrapper<Shop> queryWrapper = new LambdaQueryWrapper<>();
-        queryWrapper.eq(Shop::getTypeId, typeId);
-
-        // 3. 执行分页查询（用 this.page，而不是 this.lambdaQuery）
-        this.page(page, queryWrapper);
-
-        // 4. 返回分页后的数据
-        return Result.ok(page.getRecords());
-    }
 
 }
