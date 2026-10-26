@@ -10,6 +10,9 @@ import com.hmdp.service.IVoucherOrderService;
 import com.hmdp.utils.ILock;
 import com.hmdp.utils.RedisIdWorker;
 import com.hmdp.utils.SimpleRedisLock;
+import com.hmdp.utils.UserHolder;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
@@ -34,6 +37,7 @@ import java.util.concurrent.Executors;
  * @since 2021-12-22
  */
 @Service
+@Slf4j
 public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, VoucherOrder> implements IVoucherOrderService {
 
     @Resource
@@ -42,19 +46,10 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     @Resource
     private StringRedisTemplate stringRedisTemplate;
 
-    @Resource
+    @Autowired
     private RedisIdWorker redisIdWorker;
 
-    /**
-     * 秒杀优惠券
-     * 1.synchronized异步下单--一个一个排队下单
-     * 2.基于Redis实现分布式锁
-     * 3.基于lua脚本把判断锁的主人并删除锁的操作原子化，防止误删其他用户锁，保证锁的释放
-     * 4.把所有的“判断和扣减”全部塞进 Redis 的 Lua 脚本 里，然后利用 阻塞队列 进行异步下单。
-     * @param voucherId
-     * @return
-     */
-    // 1. 加载 Lua 脚本
+    // 1. 加载 Lua 脚本 --- 把 seckill.lua 文件读进内存，打包成一个 DefaultRedisScript 对象
     private static final DefaultRedisScript<Long> SECKILL_SCRIPT;
     static {
         SECKILL_SCRIPT = new DefaultRedisScript<>();
@@ -69,6 +64,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     private static final ExecutorService SECKILL_ORDER_EXECUTOR = Executors.newSingleThreadExecutor();
 
     // 4. 项目一启动，这个后台线程就开始死循环监听队列
+//    当 Spring 把这个类的对象创建好，并且把里面的 @Resource（比如 stringRedisTemplate）都注入完毕后，Spring 会立刻自动调用带有 @PostConstruct 注解的 init() 方法。
     @PostConstruct
     private void init() {
         SECKILL_ORDER_EXECUTOR.submit(() -> {
@@ -85,10 +81,22 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         });
     }
 
+    /**
+     * 秒杀优惠券
+     * 1.synchronized异步下单--一个一个排队下单
+     * 2.基于Redis实现分布式锁
+     * 3.基于lua脚本把判断锁的主人并删除锁的操作原子化，防止误删其他用户锁，保证锁的释放
+     * 4.把所有的“判断和扣减”全部塞进 Redis 的 Lua 脚本 里，然后利用 阻塞队列 进行异步下单。
+     * @param voucherId
+     * @return
+     */
     @Override
     public Result seckillVoucher(Long voucherId) {
         // 获取当前用户（测试时如果没有登录，去 Controller 里或者这里临时写死 1L）
-        Long userId = Thread.currentThread().getId();
+//        Long userId = Thread.currentThread().getId();// 删掉这行测试代码
+        Long userId = UserHolder.getUser().getId(); // 换成真实登录用户
+
+        log.info("当前用户id：{}", userId);
 
         // 5. 执行 Lua 脚本
         Long result = stringRedisTemplate.execute(
@@ -99,6 +107,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         );
 
         // 6. 判断结果
+        // r=0，下单成功；r=1，库存不足；r=2，不能重复下单
         int r = result.intValue();
         if (r != 0) {
             return Result.fail(r == 1 ? "库存不足！" : "不能重复下单！");
@@ -121,6 +130,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     // 这个方法在后台线程里执行，去写 MySQL
     private void handleVoucherOrder(VoucherOrder voucherOrder) {
         Long voucherId = voucherOrder.getVoucherId();
+        log.info("处理订单：{}", voucherOrder.getId());
 
         // 🚨 必须加这两句，去扣 MySQL 的库存！
         seckillVoucherService.update()

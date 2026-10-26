@@ -20,5 +20,9 @@ public interface IShopService extends IService<Shop> {
 
     Result queryShopByType(Integer typeId, Integer current);
 
+    Result updateShopById(Shop shop);
+
+    Result queryShopByName(String name, Integer current);
+
 //    void saveShopToCache(Long id, Long expireSeconds);
 }

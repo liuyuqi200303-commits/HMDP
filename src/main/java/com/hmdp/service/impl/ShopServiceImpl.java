@@ -129,7 +129,29 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         this.page(page, queryWrapper);
 
         // 4. 返回分页后的数据
-        return Result.ok(page.getRecords());
+        return Result.ok(page);
+    }
+
+    @Override
+    public Result updateShopById(Shop shop) {
+        if (shop.getId() == null){
+            return Result.fail("店铺id不能为空");
+        }
+        this.updateById(shop);
+        stringRedisTemplate.delete(RedisConstants.CACHE_SHOP_KEY + shop.getId());
+
+        return Result.ok();
+    }
+
+    @Override
+    public Result queryShopByName(String name, Integer current) {
+        // 1. 构建分页对象，
+        Page<Shop> page = new Page<>(current, SystemConstants.DEFAULT_PAGE_SIZE);
+        // 2. MP的链式查询
+        this.lambdaQuery()
+                .like(StrUtil.isNotBlank(name), Shop::getName, name)
+                .page(page);
+        return Result.ok(page);
     }
 
 //    /**

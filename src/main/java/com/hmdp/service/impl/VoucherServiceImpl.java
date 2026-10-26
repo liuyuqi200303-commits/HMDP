@@ -34,6 +34,7 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
     @Override
     public Result queryVoucherOfShop(Long shopId) {
         // 查询优惠券信息
+        // MyBatis-Plus 的 Service 只有标准的 CRUD，它不认识这个手写的方法。所以你要通过 getBaseMapper() 拿到 Mapper，去调用你手写的专属 SQL。
         List<Voucher> vouchers = getBaseMapper().queryVoucherOfShop(shopId);
         // 返回结果
         return Result.ok(vouchers);
@@ -54,6 +55,7 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
         seckillVoucherService.save(seckillVoucher);
 
         // 🚨 核心：把库存预热到 Redis 里！Key 格式：seckill:stock:优惠券ID
+        // 秒杀优惠券业务专用
         stringRedisTemplate.opsForValue().set("seckill:stock:" + voucher.getId(), String.valueOf(voucher.getStock()));
     }
 }

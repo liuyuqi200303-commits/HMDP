@@ -24,7 +24,7 @@ public class VoucherController {
     private IVoucherService voucherService;
 
     /**
-     * 新增普通券
+     * 新增普通券---MP自动完成
      * @param voucher 优惠券信息
      * @return 优惠券id
      */
@@ -35,7 +35,7 @@ public class VoucherController {
     }
 
     /**
-     * 新增秒杀券
+     * 新增秒杀券--有service层业务逻辑
      * @param voucher 优惠券信息，包含秒杀信息
      * @return 优惠券id
      */
