@@ -26,4 +26,8 @@ public interface IUserService extends IService<User> {
     User createUserWithPhone(String phone);
 
     Result logout(String token);
+
+    Result sign();
+
+    Result signCount();
 }
