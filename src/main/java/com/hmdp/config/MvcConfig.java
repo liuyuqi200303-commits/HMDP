@@ -27,7 +27,7 @@ public class MvcConfig implements WebMvcConfigurer {
                         "/user/code",
                         "/user/login",
                         "/shop/**",
-                        "/blog/hot",
+                        "/blog/**",
                         "/voucher/**",
                         "/upload/**"
                 ).order(1); // order(1) 优先级低，排在刷新拦截器后面执行
