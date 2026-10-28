@@ -15,15 +15,17 @@ import com.hmdp.mapper.ShopMapper;
 import com.hmdp.service.IShopService;
 import com.hmdp.utils.*;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.geo.*;
+import org.springframework.data.redis.connection.RedisGeoCommands;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
-import java.util.List;
-import java.util.Objects;
+import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 import static com.hmdp.utils.RedisConstants.CACHE_SHOP_KEY;
 
@@ -40,6 +42,35 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
 
     @Autowired
     private StringRedisTemplate stringRedisTemplate;
+
+    @Override
+    public void loadShopData() {
+        // 1. 查询所有店铺信息
+        List<Shop> list = this.list();
+
+        // 2. 按照 typeId 进行分组（因为 Redis 的 GEO 是按类型分类的，比如美食一个圈，KTV一个圈）
+        Map<Long, List<Shop>> map = list.stream().collect(Collectors.groupingBy(Shop::getTypeId));
+
+        // 3. 分批写入 Redis
+        for (Map.Entry<Long, List<Shop>> entry : map.entrySet()) {
+            Long typeId = entry.getKey();
+            List<Shop> shopList = entry.getValue();
+
+            String key = "shop:geo:" + typeId;
+
+            // 用 List 把一个个 Point 对象装起来，然后批量存入
+            List<RedisGeoCommands.GeoLocation<String>> locations = new ArrayList<>(shopList.size());
+            for (Shop shop : shopList) {
+                // 这里的 id 要转成 String，作为 GEO 集合里的 member
+                locations.add(new RedisGeoCommands.GeoLocation<>(
+                        shop.getId().toString(),
+                        new Point(shop.getX(), shop.getY()) // 经度 x, 纬度 y
+                ));
+            }
+            // 批量存入 Redis：GEADD key 经度 纬度 member
+            stringRedisTemplate.opsForGeo().add(key, locations);
+        }
+    }
 
     /**
      * 缓存重建线程池---线程池，用于后台重建缓存
@@ -110,27 +141,88 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         }
     }
 
-    /**
-     * 根据类型查询商铺数据
-     * @param typeId
-     * @param current
-     * @return
-     */
     @Override
-    public Result queryShopByType(Integer typeId, Integer current) {
-        // 1. 构建分页对象
-        Page<Shop> page = new Page<>(current, SystemConstants.DEFAULT_PAGE_SIZE);
+    public Result queryShopByType(Integer typeId, Integer current, Double x, Double y) {
+        // 1. 判断是否需要根据坐标查询
+        if (x == null || y == null) {
+            // 没有坐标，走普通数据库分页
+            Page<Shop> page = this.query()
+                    .eq("type_id", typeId)
+                    .page(new Page<>(current, SystemConstants.DEFAULT_PAGE_SIZE));
+            return Result.ok(page.getRecords());
+        }
 
-        // 2. 构建查询条件
-        LambdaQueryWrapper<Shop> queryWrapper = new LambdaQueryWrapper<>();
-        queryWrapper.eq(Shop::getTypeId, typeId);
+        // 2. 计算分页参数
+        int from = (current - 1) * SystemConstants.DEFAULT_PAGE_SIZE;
+        int end = current * SystemConstants.DEFAULT_PAGE_SIZE;
 
-        // 3. 执行分页查询（用 this.page，而不是 this.lambdaQuery）
-        this.page(page, queryWrapper);
+        // 3. 去 Redis 查 GEO
+        String key = RedisConstants.SHOP_GEO_KEY + typeId;
+        GeoResults<RedisGeoCommands.GeoLocation<String>> results = stringRedisTemplate.opsForGeo().radius(
+                key,
+                new Circle(new Point(x, y), 5000), // 半径 5000 米
+                RedisGeoCommands.GeoRadiusCommandArgs.newGeoRadiusArgs()
+//                        默认情况下，Redis 只返回店铺的 ID。加上这个参数，Redis 就会额外返回一个值：这个店距离圆心（用户）有多少米。
+//                        这也就是为什么你在 Java 里能通过 result.getDistance() 拿到距离。
+                        .includeDistance()
+                        .sortAscending()
+                        .limit(end)
+        );
 
-        // 4. 返回分页后的数据
-        return Result.ok(page);
+        // 4. 解析结果  ----  防呆设计
+        if (results == null) {
+            return Result.ok(Collections.emptyList());
+        }
+        List<GeoResult<RedisGeoCommands.GeoLocation<String>>> list = results.getContent();
+        if (list.size() <= from) {
+            return Result.ok(Collections.emptyList());
+        }
+
+        // 5. 截取 from ~ end 的部分
+        List<Long> ids = new ArrayList<>(list.size());
+        Map<String, Distance> distanceMap = new HashMap<>(list.size());
+        list.stream().skip(from).forEach(result -> {
+            String shopIdStr = result.getContent().getName();
+            ids.add(Long.valueOf(shopIdStr));
+            Distance distance = result.getDistance();
+            distanceMap.put(shopIdStr, distance);
+        });
+
+        // 6. 根据 id 去数据库查详细信息（保持距离顺序）
+        String idStr = StrUtil.join(",", ids);
+        List<Shop> shops = this.query()
+                .in("id", ids)
+                .last("ORDER BY FIELD(id," + idStr + ")")
+                .list();
+
+        // 7. 把距离塞进 Shop 对象里
+        for (Shop shop : shops) {
+            shop.setDistance(distanceMap.get(shop.getId().toString()).getValue());
+        }
+
+        return Result.ok(shops);
     }
+//    /**
+//     * 根据类型查询商铺数据
+//     * @param typeId
+//     * @param current
+//     * @return
+//     */
+//    @Override
+//    public Result queryShopByType(Integer typeId, Integer current) {
+//        // 1. 构建分页对象
+//        Page<Shop> page = new Page<>(current, SystemConstants.DEFAULT_PAGE_SIZE);
+//
+//        // 2. 构建查询条件
+//        LambdaQueryWrapper<Shop> queryWrapper = new LambdaQueryWrapper<>();
+//        queryWrapper.eq(Shop::getTypeId, typeId);
+//
+//        // 3. 执行分页查询（用 this.page，而不是 this.lambdaQuery）
+//        this.page(page, queryWrapper);
+//
+//        // 4. 返回分页后的数据
+//        return Result.ok(page);
+//    }
 
     @Override
     public Result updateShopById(Shop shop) {

@@ -16,9 +16,11 @@ import javax.management.Query;
  */
 public interface IShopService extends IService<Shop> {
 
+    void loadShopData();
+
     Result queryById(Long id);
 
-    Result queryShopByType(Integer typeId, Integer current);
+    Result queryShopByType(Integer typeId, Integer current, Double x, Double y);
 
     Result updateShopById(Shop shop);
 
